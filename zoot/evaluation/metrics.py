@@ -9,7 +9,7 @@ from .evaluator import run_fixed_benchmark
 from ..testing import ScriptedModelClient
 from ..providers import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
 from ..core.runtime import Zoot, SessionStore
-from ..core.workspace import WorkspaceContext
+from ..core.workspace import WorkspaceContext, read_jsonl
 
 METRICS_SCHEMA_VERSION = 2
 DEFAULT_HARNESS_REGRESSION_V2_PATH = Path("artifacts/harness-regression-v2.json")
@@ -102,7 +102,7 @@ def aggregate_run_artifacts(runs_root):
             reports.append(json.loads(report_path.read_text(encoding="utf-8")))
         events = []
         if trace_path.exists():
-            events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            events = read_jsonl(trace_path)
         run_durations.append(_infer_run_duration_ms(events))
         for event in events:
             if event.get("event") == "prompt_built" and event.get("duration_ms") is not None:
@@ -787,7 +787,7 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
 
 def _followup_trace_metrics(agent):
     trace_path = agent.run_store.trace_path(agent.current_task_state)
-    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    events = read_jsonl(trace_path)
     repeated_reads = sum(1 for event in events if event.get("event") == "tool_executed" and event.get("name") == "read_file")
     return repeated_reads
 
@@ -1506,10 +1506,7 @@ def _run_recovery_task_variant(task, variant):
             agent.session_store.save(agent.session)
         final_answer = agent.ask("Continue the recovery task.")
         report = agent.run_store.load_report(agent.current_task_state.run_id)
-        trace = [
-            json.loads(line)
-            for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
-        ]
+        trace = read_jsonl(agent.run_store.trace_path(agent.current_task_state))
         resume_status = str(report.get("prompt_metadata", {}).get("resume_status", ""))
         stale_reanchored = any(
             event.get("event") == "checkpoint_created" and event.get("trigger") == "freshness_mismatch"

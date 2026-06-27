@@ -1,8 +1,10 @@
+
 import json
 
 from zoot.testing import ScriptedModelClient
 from zoot import Zoot, SessionStore, WorkspaceContext
 from zoot.providers import ProviderError
+from zoot.core.workspace import read_jsonl
 
 
 def build_agent(tmp_path, outputs, **kwargs):
@@ -16,14 +18,6 @@ def build_agent(tmp_path, outputs, **kwargs):
         approval_policy="auto",
         **kwargs,
     )
-
-
-def read_jsonl(path):
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
 
 
 def test_engine_streams_a_real_session_with_tool_artifacts(tmp_path):

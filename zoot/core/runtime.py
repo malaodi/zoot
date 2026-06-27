@@ -749,11 +749,7 @@ class Zoot(RuntimeSecretsMixin, RuntimeCheckpointsMixin):
             return
         if name in {"read_file", "write_file", "patch_file"}:
             self.memory.remember_file(canonical_path)
-        if name == "read_file":
-            self.memory.append_note(
-                summary, tags=(canonical_path,), source=canonical_path
-            )
-        elif name in {"write_file", "patch_file"}:
+        if name in {"write_file", "patch_file"}:
             self.memory.invalidate_file_summary(canonical_path)
 
     def note_tool(self, name, args, result):
@@ -761,22 +757,45 @@ class Zoot(RuntimeSecretsMixin, RuntimeCheckpointsMixin):
 
     def record_process_note_for_tool(self, name, metadata):
         status = str(metadata.get("tool_status", "")).strip()
-        if status not in {"partial_success", "error", "rejected"}:
-            return
         affected_paths = [
             str(path).strip()
             for path in metadata.get("affected_paths", [])
             if str(path).strip()
         ]
         path_text = ", ".join(affected_paths) or "workspace"
-        if status == "partial_success":
-            text = f"{name} partial_success on {path_text}; inspect diff before retry"
-        elif status == "error":
-            text = f"{name} error on {path_text}; check the failure before retry"
-        else:
+
+        note_type = None
+        text = None
+
+        if status == "rejected":
+            note_type = "blocker"
             text = f"{name} rejected; choose a different action before retry"
-        tags = ["process", status, *affected_paths]
-        self.memory.append_note(text, tags=tuple(tags), source=name, kind="process")
+        elif status == "error":
+            note_type = "blocker"
+            text = f"{name} error on {path_text}; check the failure before retry"
+        elif status == "partial_success":
+            note_type = "blocker"
+            text = f"{name} partial_success on {path_text}; inspect diff before retry"
+        elif status == "success" and name in {"search", "read_file"}:
+            result = str(metadata.get("result", "")).strip()
+            if not result or result == "(empty)" or result == "(no matches)":
+                note_type = "ruled_out"
+                text = f"{name} returned empty result for {path_text}; this direction is ruled out"
+            elif name == "search" and result.count("\n") == 0:
+                note_type = "confirmed"
+                text = f"{name} found exactly one match for query in {path_text}"
+
+        if not note_type or not text:
+            return
+
+        tags = ["process", note_type, *affected_paths]
+        self.memory.append_note(
+            text,
+            tags=tuple(tags),
+            source=name,
+            kind="process",
+            note_type=note_type,
+        )
         self.session["memory"] = self.memory.to_dict()
 
     def reject_durable_reason(self, note_text):

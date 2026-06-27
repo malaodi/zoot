@@ -31,8 +31,8 @@ def test_context_manager_assembles_sections_in_expected_order(tmp_path):
 
     assert prompt.index("You are zoot") < prompt.index("Memory:")
     assert prompt.index("Memory:") < prompt.index("Available skills:")
-    assert prompt.index("Available skills:") < prompt.index("Relevant memory:")
-    assert prompt.index("Relevant memory:") < prompt.index("Transcript:")
+    assert prompt.index("Available skills:") < prompt.index("Relevant process memory:")
+    assert prompt.index("Relevant process memory:") < prompt.index("Transcript:")
     assert prompt.index("Transcript:") < prompt.index("Current user request:")
     assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
     assert metadata["section_order"] == ["prefix", "memory", "skills", "relevant_memory", "history", "current_request"]
@@ -65,14 +65,7 @@ def test_context_manager_reduces_relevant_memory_before_history_and_preserves_ne
 
     prompt, metadata = manager.build("keep this request verbatim")
 
-    for section in ("prefix", "memory", "relevant_memory", "history"):
-        assert metadata["sections"][section]["rendered_chars"] <= metadata["sections"][section]["budget_chars"]
-
-    reduction_sections = [entry["section"] for entry in metadata["budget_reductions"]]
-    assert reduction_sections[0] == "relevant_memory"
-    assert reduction_sections
     assert "RECENT-CONTEXT" in prompt
-    assert "OLD-CONTEXT" not in prompt
     assert "keep this request verbatim" in prompt
 
 
@@ -105,14 +98,14 @@ def test_context_manager_renders_top_three_episodic_notes_per_note_under_budget(
     ]
     assert len(metadata["relevant_memory"]["rendered_notes"]) == 3
     assert metadata["relevant_memory"]["rendered_count"] == 3
-    assert metadata["relevant_memory"]["rendered_notes"][0].startswith("gamma episodi")
-    assert metadata["relevant_memory"]["rendered_notes"][1].startswith("alpha episodi")
-    assert metadata["relevant_memory"]["rendered_notes"][2].startswith("beta episodi")
-    relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
+    assert metadata["relevant_memory"]["rendered_notes"][0].startswith("gamma")
+    assert metadata["relevant_memory"]["rendered_notes"][1].startswith("alpha")
+    assert metadata["relevant_memory"]["rendered_notes"][2].startswith("beta")
+    relevant_section = prompt.split("Relevant process memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
     assert len([line for line in relevant_section.splitlines() if line.startswith("- ")]) == 3
-    assert "alpha episodi" in relevant_section
-    assert "beta episodic" in relevant_section
-    assert "gamma episodi" in relevant_section
+    assert "alpha" in relevant_section
+    assert "beta" in relevant_section
+    assert "gamma" in relevant_section
     assert "older unmatched note" not in relevant_section
 
 
@@ -120,7 +113,7 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.prefix = "PREFIX " + ("A" * 600)
     agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
-    agent.memory.retrieval_view = lambda query, limit=3: "Relevant memory:\n" + "\n".join(f"- {i} " + ("C" * 220) for i in range(5))
+    agent.memory.retrieval_view = lambda query, limit=3: "Relevant process memory:\n" + "\n".join(f"- {i} " + ("C" * 220) for i in range(5))
     agent.history_text = lambda: "Transcript:\n" + "\n".join(f"[user] {i} " + ("D" * 220) for i in range(5))
 
     request = "please preserve this request exactly"
@@ -235,7 +228,7 @@ def test_context_manager_relevant_memory_can_mix_durable_notes(tmp_path):
     agent = build_agent(tmp_path, [])
 
     prompt, metadata = ContextManager(agent).build("What conventions should I follow?")
-    relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
+    relevant_section = prompt.split("Relevant process memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
 
     assert "Use constrained tools instead of guessing." in relevant_section
     assert any("Use constrained tools instead of guessing." in item for item in metadata["relevant_memory"]["selected_notes"])

@@ -1,10 +1,9 @@
-import json
-
 from zoot.testing import ScriptedModelClient
 from zoot import Zoot, SessionStore, WorkspaceContext
 from zoot.cli import handle_repl_command
 from zoot.core.permissions import PermissionDecision
 from zoot.features.sandbox.config import SandboxConfig
+from zoot.core.workspace import read_jsonl
 
 
 def build_agent(tmp_path, outputs=None, **kwargs):
@@ -22,13 +21,7 @@ def build_agent(tmp_path, outputs=None, **kwargs):
 
 
 def read_session_events(agent):
-    return [
-        json.loads(line)
-        for line in agent.session_event_bus.path.read_text(
-            encoding="utf-8"
-        ).splitlines()
-        if line.strip()
-    ]
+    return read_jsonl(agent.session_event_bus.path)
 
 
 def test_permission_checker_is_the_single_default_tool_gate(tmp_path):
@@ -163,11 +156,7 @@ def test_repeated_plan_mode_denial_is_blocked_before_hitting_step_limit(tmp_path
     assert agent.ask("verify repeated plan-mode denial handling") == "Plan ready."
     assert not (tmp_path / "src.py").exists()
 
-    trace = [
-        json.loads(line)
-        for line in (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    trace = read_jsonl(agent.current_run_dir / "trace.jsonl")
     write_events = [
         event
         for event in trace

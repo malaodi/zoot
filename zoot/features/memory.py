@@ -17,7 +17,21 @@ from ..core.workspace import WorkspaceContext, clip, now
 
 WORKING_FILE_LIMIT = 8
 EPISODIC_NOTE_LIMIT = 12
+BLOCKER_RECALL_LIMIT = 2
 FILE_SUMMARY_LIMIT = 6
+TYPE_RECALL_BONUS = {
+    "blocker": 3,
+    "decision": 2,
+    "confirmed": 1,
+    "ruled_out": 0,
+}
+
+TYPE_BUCKET_QUOTAS = {
+    "blocker": 3,
+    "decision": 3,
+    "confirmed": 4,
+    "ruled_out": 4,
+}
 MAX_MEMORY_INDEX_CHARS = 10000
 MAX_ENTRYPOINT_LINES = 200
 ENTRYPOINT_NAME = "MEMORY.md"
@@ -888,14 +902,22 @@ def _normalize_note(note, index):
     created_at = str(note.get("created_at", "")).strip() or now()
     note_index = int(note.get("note_index", index))
     kind = str(note.get("kind", "episodic")).strip() or "episodic"
-    return {
+    note_type = str(note.get("type", "")).strip() or ""
+    recall_hits = int(note.get("recall_hits", 0))
+    last_recalled_turn = int(note.get("last_recalled_turn", 0))
+    result = {
         "text": text,
         "tags": _dedupe_preserve_order(tags),
         "source": source,
         "created_at": created_at,
         "note_index": note_index,
         "kind": kind,
+        "recall_hits": recall_hits,
+        "last_recalled_turn": last_recalled_turn,
     }
+    if note_type:
+        result["type"] = note_type
+    return result
 
 
 def normalize_memory_state(state, workspace_root=None):
@@ -1010,7 +1032,7 @@ def remember_file(state, path, workspace_root=None):
     return state
 
 
-def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None, kind="episodic"):
+def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None, kind="episodic", note_type=""):
     state = normalize_memory_state(state, workspace_root)
     text = clip(str(text).strip(), 500)
     if not text:
@@ -1027,13 +1049,76 @@ def append_note(state, text, tags=(), source="", created_at=None, workspace_root
         "note_index": int(state.get("next_note_index", 0)),
         "kind": str(kind).strip() or "episodic",
     }
+    note_type_val = str(note_type).strip()
+    if note_type_val:
+        note["type"] = note_type_val
+    note["recall_hits"] = 0
+    note["last_recalled_turn"] = 0
     state["next_note_index"] = note["note_index"] + 1
 
-    notes = [item for item in state["episodic_notes"] if item["text"] != note["text"]]
-    notes.append(note)
-    state["episodic_notes"] = notes[-EPISODIC_NOTE_LIMIT:]
+    notes = state["episodic_notes"]
+    existing = None
+    for i, item in enumerate(notes):
+        if item["text"] == note["text"]:
+            existing = i
+            break
+    if existing is not None:
+        note["recall_hits"] = notes[existing].get("recall_hits", 0)
+        note["last_recalled_turn"] = notes[existing].get("last_recalled_turn", 0)
+        notes[existing] = note
+    else:
+        notes.append(note)
+
+    state["episodic_notes"] = _evict_by_type_buckets(notes)
     state["notes"] = [item["text"] for item in state["episodic_notes"]]
     return state
+
+
+def _evict_by_type_buckets(notes):
+    """Evict notes exceeding per-type quotas using retention score."""
+    by_type = {}
+    for note in notes:
+        note_type = str(note.get("type", "")).strip() or "general"
+        by_type.setdefault(note_type, []).append(note)
+
+    result = []
+    for note_type, bucket in by_type.items():
+        quota = TYPE_BUCKET_QUOTAS.get(note_type, 12)
+        if len(bucket) <= quota:
+            result.extend(bucket)
+        else:
+            scored = [(retention_score(note), note) for note in bucket]
+            scored.sort(key=lambda item: item[0], reverse=True)
+            result.extend(note for _, note in scored[:quota])
+
+    result.sort(key=lambda note: note.get("note_index", 0))
+    return result
+
+
+def retention_score(note):
+    """Calculate retention score for eviction priority. Higher = keep."""
+    score = 0
+    score += 3 * int(note.get("recall_hits", 0))
+    note_type = str(note.get("type", "")).strip()
+    if note_type in {"blocker", "decision"}:
+        score += 2
+    age_in_notes = int(note.get("note_index", 0))
+    score -= age_in_notes * 0.01
+    score -= 3 * (1 if _is_freshness_invalid(note) else 0)
+    return score
+
+
+def _is_freshness_invalid(note):
+    """Check if freshness is explicitly invalid. Default: not invalid."""
+    return bool(note.get("freshness_invalid", False))
+
+
+def record_recall(note, current_turn):
+    """Increment recall_hits and update last_recalled_turn on retrieval."""
+    if not isinstance(note, dict):
+        return
+    note["recall_hits"] = int(note.get("recall_hits", 0)) + 1
+    note["last_recalled_turn"] = int(current_turn or 0)
 def set_file_summary(state, path, summary, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     path = canonicalize_path(path, workspace_root).strip()
@@ -1086,42 +1171,65 @@ def summarize_read_result(result, limit=180):
 def retrieval_candidates(state, query, limit=3, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     query_tokens = _tokenize(query)
+
+    blocker_boost = [
+        note for note in state["episodic_notes"]
+        if note.get("type") == "blocker"
+    ][-BLOCKER_RECALL_LIMIT:]
+
     ranked = []
+    override_note_texts = {note.get("text", "") for note in blocker_boost}
+    for note in blocker_boost:
+        ranked.append(((100, 0, _parse_timestamp(note.get("created_at")), int(note.get("note_index", 0))), note))
+
     for note in state["episodic_notes"]:
-        # 召回逻辑故意保持简单透明：先看 tag 精确命中，
-        # 再看关键词重叠，最后看新旧程度。这里不引入 embedding。
+        if note.get("text", "") in override_note_texts:
+            continue
         note_tags = {tag.lower() for tag in note.get("tags", [])}
         note_tokens = _tokenize(note.get("text", "")) | _tokenize(note.get("source", "")) | note_tags
         exact_tag_match = int(bool(query_tokens & note_tags))
         keyword_overlap = len(query_tokens & note_tokens)
-        if exact_tag_match == 0 and keyword_overlap == 0:
+        overlap_threshold = 0
+        if note.get("type") == "decision":
+            overlap_threshold = -1
+        if exact_tag_match == 0 and keyword_overlap <= overlap_threshold:
             continue
+        type_bonus = TYPE_RECALL_BONUS.get(note.get("type", ""), 0)
         recency = _parse_timestamp(note.get("created_at"))
         note_index = int(note.get("note_index", 0))
-        ranked.append(((exact_tag_match, keyword_overlap, recency, note_index), note))
+        ranked.append(((exact_tag_match + type_bonus, keyword_overlap, recency, note_index), note))
 
     if workspace_root is not None:
         durable_store = DurableMemoryStore(Path(workspace_root) / ".zoot" / "memory")
         for note in durable_store.retrieval_candidates(query, limit=limit):
+            if note.get("text", "") in override_note_texts:
+                continue
             note_tags = {tag.lower() for tag in note.get("tags", [])}
             note_tokens = _tokenize(note.get("text", "")) | _tokenize(note.get("source", "")) | note_tags
             exact_tag_match = int(bool(query_tokens & note_tags))
             keyword_overlap = len(query_tokens & note_tokens)
+            type_bonus = TYPE_RECALL_BONUS.get(note.get("type", ""), 0)
             recency = _parse_timestamp(note.get("created_at"))
-            ranked.append(((exact_tag_match, keyword_overlap, recency, -1), note))
+            ranked.append(((exact_tag_match + type_bonus, keyword_overlap, recency, -1), note))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [note for _, note in ranked[:limit]]
+    result = []
+    for _, note in ranked[:limit]:
+        record_recall(note, state.get("_current_turn", 0))
+        result.append(note)
+    return result
 
 
 def retrieval_view(state, query, limit=3, workspace_root=None):
     candidates = retrieval_candidates(state, query, limit=limit, workspace_root=workspace_root)
-    lines = ["Relevant memory:"]
+    lines = ["Relevant process memory:"]
     if not candidates:
         lines.append("- none")
         return "\n".join(lines)
     for note in candidates:
-        lines.append(f"- {note['text']}")
+        note_type = note.get("type", "")
+        prefix = f"{note_type}: " if note_type else ""
+        lines.append(f"- {prefix}{note['text']}")
     return "\n".join(lines)
 
 
@@ -1184,7 +1292,7 @@ class LayeredMemory:
         self.state = remember_file(self.state, path, self.workspace_root)
         return self
 
-    def append_note(self, text, tags=(), source="", created_at=None, kind="episodic"):
+    def append_note(self, text, tags=(), source="", created_at=None, kind="episodic", note_type=""):
         self.state = append_note(
             self.state,
             text,
@@ -1193,6 +1301,7 @@ class LayeredMemory:
             created_at=created_at,
             workspace_root=self.workspace_root,
             kind=kind,
+            note_type=note_type,
         )
         return self
 

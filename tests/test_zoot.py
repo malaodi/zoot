@@ -11,6 +11,7 @@ import zoot as zoot_pkg
 import zoot.providers as providers_pkg
 import pytest
 from zoot.testing import ScriptedModelClient
+from zoot.core.workspace import read_jsonl
 from zoot import (
     AnthropicCompatibleModelClient,
     Zoot,
@@ -85,9 +86,12 @@ def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
     )
 
     assert agent.ask("Read the file and remember the fact") == "Done."
+    # read_file summaries now go to file_summaries, not episodic_notes
+    summaries = agent.session["memory"]["file_summaries"]
+    canonical = agent.memory.canonical_path("facts.txt")
+    assert canonical in summaries
+    assert "deploy key is red" in summaries[canonical]["summary"]
     notes = agent.session["memory"]["episodic_notes"]
-    assert any("deploy key is red" in note["text"] for note in notes)
-    assert not any(note["text"] == "Done." for note in notes)
     assert not any(note["text"] == "Done." for note in notes)
 
     resumed = Zoot.from_session(
@@ -100,7 +104,7 @@ def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
 
     assert resumed.ask("What color is the deploy key?") == "It is red."
     prompt = resumed.model_client.prompts[-1]
-    assert "Relevant memory" in prompt
+    assert "Relevant process memory" in prompt
     assert "deploy key is red" in prompt
 
 
@@ -941,7 +945,6 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
     run_dir = run_dirs[0]
     task_state = json.loads((run_dir / "task_state.json").read_text(encoding="utf-8"))
     report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-    trace_lines = (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
 
     assert task_state["task_id"] != task_state["run_id"]
     assert run_dir.name == task_state["run_id"]
@@ -953,7 +956,7 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
     assert report["stop_reason"] == "final_answer_returned"
     assert report["task_state"]["stop_reason"] == "final_answer_returned"
     assert report["run_id"] == task_state["run_id"]
-    trace_events = [json.loads(line)["event"] for line in trace_lines]
+    trace_events = [event["event"] for event in read_jsonl(run_dir / "trace.jsonl")]
     assert trace_events[0] == "run_started"
     assert trace_events[-1] == "run_finished"
     assert trace_events.count("prompt_built") == 2
@@ -980,7 +983,7 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
     run_dir = run_dirs[0]
     trace_text = (run_dir / "trace.jsonl").read_text(encoding="utf-8")
     report_text = (run_dir / "report.json").read_text(encoding="utf-8")
-    trace_events = [json.loads(line) for line in trace_text.splitlines()]
+    trace_events = read_jsonl(run_dir / "trace.jsonl")
 
     assert secret not in trace_text
     assert secret not in report_text
@@ -1021,21 +1024,18 @@ def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
 
     assert agent.ask("recall") == "Done."
 
-    trace_events = [
-        json.loads(line)
-        for line in (agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines())
-    ]
+    trace_events = read_jsonl(agent.run_store.trace_path(agent.current_task_state))
     prompt_events = [event for event in trace_events if event["event"] == "prompt_built"]
     assert prompt_events
     metadata = prompt_events[0]["prompt_metadata"]
-    relevant_section = agent.model_client.prompts[0].split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
+    relevant_section = agent.model_client.prompts[0].split("Relevant process memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
 
     assert metadata["relevant_memory"]["selected_count"] == 3
     assert len(metadata["relevant_memory"]["rendered_notes"]) == 3
     assert len([line for line in relevant_section.splitlines() if line.startswith("- ")]) == 3
-    assert "alpha episodic" in relevant_section
-    assert "beta episodic" in relevant_section
-    assert "gamma episodic" in relevant_section
+    assert "alpha" in relevant_section
+    assert "beta" in relevant_section
+    assert "gamma" in relevant_section
     assert metadata["current_request"]["text"] == "recall"
     assert metadata["current_request"]["rendered_chars"] == len("recall")
 
@@ -1092,10 +1092,7 @@ def test_agent_creates_checkpoint_when_context_reduction_happens_and_artifacts_o
 
     task_state = json.loads(agent.run_store.task_state_path(agent.current_task_state).read_text(encoding="utf-8"))
     report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
-    trace_events = [
-        json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
-    ]
+    trace_events = read_jsonl(agent.run_store.trace_path(agent.current_task_state))
 
     assert task_state["checkpoint_id"] == checkpoint["checkpoint_id"]
     assert report["checkpoint_id"] == checkpoint["checkpoint_id"]
@@ -1257,10 +1254,7 @@ def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
 
     assert agent.ask("Create notes.txt") == "Done."
 
-    trace_events = [
-        json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
-    ]
+    trace_events = read_jsonl(agent.run_store.trace_path(agent.current_task_state))
     tool_event = [event for event in trace_events if event["event"] == "tool_executed"][-1]
 
     assert tool_event["name"] == "write_file"
@@ -1357,10 +1351,7 @@ def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path)
 
     assert agent.ask("Continue the task") == "Resumed."
 
-    trace_events = [
-        json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
-    ]
+    trace_events = read_jsonl(agent.run_store.trace_path(agent.current_task_state))
     checkpoint_events = [event for event in trace_events if event["event"] == "checkpoint_created"]
 
     assert checkpoint_events
@@ -1452,10 +1443,7 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
         "shell_env_allowlist",
     ]
 
-    trace_events = [
-        json.loads(line)
-        for line in resumed.run_store.trace_path(resumed.current_task_state).read_text(encoding="utf-8").splitlines()
-    ]
+    trace_events = read_jsonl(resumed.run_store.trace_path(resumed.current_task_state))
     mismatch_events = [event for event in trace_events if event["event"] == "runtime_identity_mismatch"]
     assert mismatch_events
     assert mismatch_events[0]["fields"] == [
@@ -1487,7 +1475,8 @@ def test_partial_success_creates_process_note_for_exploration_history(tmp_path):
 
     assert process_notes
     assert process_notes[-1]["text"] == "run_shell partial_success on README.md; inspect diff before retry"
-    assert "partial_success" in process_notes[-1]["tags"]
+    assert "blocker" in process_notes[-1]["tags"]
+    assert process_notes[-1].get("type") == "blocker"
     assert "README.md" in process_notes[-1]["tags"]
 
 
@@ -1829,14 +1818,12 @@ def test_recent_transcript_entries_stay_richer_than_older_ones(tmp_path):
     old_text = "OLD-" + ("A" * 320)
     recent_text = "RECENT-" + ("B" * 320)
 
-    agent.record({"role": "user", "content": old_text, "created_at": "2026-04-07T09:00:00+00:00"})
-    agent.record({"role": "assistant", "content": old_text, "created_at": "2026-04-07T09:01:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:02:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:03:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:04:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:05:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:06:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:07:00+00:00"})
+    for i in range(5):
+        agent.record({"role": "user", "content": old_text, "created_at": f"2026-04-07T09:{i:02d}:00+00:00"})
+        agent.record({"role": "assistant", "content": old_text, "created_at": f"2026-04-07T09:{i:02d}:30+00:00"})
+    for i in range(5):
+        agent.record({"role": "user", "content": recent_text, "created_at": f"2026-04-07T10:{i:02d}:00+00:00"})
+        agent.record({"role": "assistant", "content": recent_text, "created_at": f"2026-04-07T10:{i:02d}:30+00:00"})
 
     assert agent.ask("Check the transcript") == "Done."
 

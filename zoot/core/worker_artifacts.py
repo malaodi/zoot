@@ -1,6 +1,6 @@
 """Evidence extraction for worker child runs."""
 
-import json
+from .workspace import read_jsonl
 
 
 def collect_worker_artifacts(root, child, task_state):
@@ -21,13 +21,7 @@ def collect_worker_artifacts(root, child, task_state):
 
 def trace_error_codes(trace_path):
     error_codes = []
-    for line in trace_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for event in read_jsonl(trace_path):
         if event.get("event") != "tool_executed":
             continue
         code = str(event.get("tool_error_code", "")).strip()

@@ -23,7 +23,7 @@ class SessionStore:
 
     def save(self, session):
         path = self.path(session["id"])
-        payload = json.dumps(session, indent=2)
+        payload = json.dumps(session, indent=2, ensure_ascii=False)
         with self._lock:
             tmp_path = path.with_name(
                 f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"

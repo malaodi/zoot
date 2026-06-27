@@ -164,7 +164,7 @@ class ToolCard(Static):
     ToolCard {
         width: 100%;
         height: auto;
-        margin: 0 0 1 0;
+        margin: 0 0 0 0;
         padding: 0 1;
         background: #14171d;
         border: tall #273244;
@@ -174,6 +174,12 @@ class ToolCard(Static):
         color: #adb5bd;
         padding: 0 1;
         overflow-x: hidden;
+    }
+    ToolCard.running {
+        border: tall #4dabf7;
+    }
+    ToolCard.error {
+        border: tall #ff6b6b;
     }
     """
 
@@ -185,6 +191,9 @@ class ToolCard(Static):
         self.output = ""
         self._collapsible: Collapsible | None = None
         self._output_widget: Static | None = None
+        self._pending_collapse = False
+        self._pending_error = False
+        self.add_class("running")
 
     def compose(self):
         self._output_widget = Static("", classes="tool-output")
@@ -193,13 +202,20 @@ class ToolCard(Static):
         )
         yield self._collapsible
 
+    def on_mount(self) -> None:
+        if self._pending_collapse and self._collapsible is not None:
+            self._collapsible.collapsed = True
+            self._pending_collapse = False
+        if self._pending_error and self._collapsible is not None:
+            self._collapsible.collapsed = False
+            self._pending_error = False
+
     def _label(self) -> str:
-        icon = {"running": "...", "success": "OK", "error": "ERR"}.get(
-            self.status, ".."
-        )
-        if self.args_summary:
-            return f"[{icon}] {self.tool_name}: {self.args_summary}"
-        return f"[{icon}] {self.tool_name}"
+        status_icon = {"running": "...", "success": "", "error": "ERR"}.get(self.status, "")
+        target = self.args_summary or self.tool_name
+        if status_icon:
+            return f"[{self.tool_name}] {status_icon} {target}"
+        return f"[{self.tool_name}] {target}"
 
     def _refresh_label(self) -> None:
         if self._collapsible is not None:
@@ -208,20 +224,27 @@ class ToolCard(Static):
     def set_success(self, output: str = "") -> None:
         self.status = "success"
         self.output = output
+        self.remove_class("running")
         self._refresh_label()
         if self._output_widget is not None:
             self._output_widget.update(_clip(output))
         if self._collapsible is not None:
             self._collapsible.collapsed = True
+        else:
+            self._pending_collapse = True
 
     def set_error(self, output: str = "") -> None:
         self.status = "error"
         self.output = output
+        self.remove_class("running")
+        self.add_class("error")
         self._refresh_label()
         if self._output_widget is not None:
             self._output_widget.update(_clip(output))
         if self._collapsible is not None:
             self._collapsible.collapsed = False
+        else:
+            self._pending_error = True
 
 
 class ConfirmPrompt(Static):
@@ -414,6 +437,7 @@ class StatusBar(Static):
         padding: 0 2;
         background: #1b1f2a;
         color: #c5d1e8;
+        dock: bottom;
     }
     """
 
@@ -427,7 +451,8 @@ class StatusBar(Static):
         model = getattr(agent.model_client, "model", "")
         mode = getattr(agent, "runtime_mode", "default")
         session = str(agent.session.get("id", ""))[-10:]
-        self.agent_text = f"model {model or '-'} | mode {mode} | session {session}"
+        branch = getattr(getattr(agent, "workspace", None), "branch", "-")
+        self.agent_text = f"model {model or '-'} | mode {mode} | session {session} | branch {branch}"
         self._render_status()
 
     def update_turns(self, count: int) -> None:
@@ -612,3 +637,65 @@ class InputBar(Static):
 def _clip(text: str, limit: int = 1200) -> str:
     text = str(text or "")
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+_TOOL_CATEGORIES = {
+    "read_file": "read",
+    "search": "read",
+    "list_files": "read",
+    "run_shell": "shell",
+    "write_file": "edit",
+    "patch_file": "edit",
+    "agent": "task",
+    "todo_create": "todo",
+    "todo_update": "todo",
+    "ask_user": "ask",
+    "enter_plan_mode": "mode",
+    "exit_plan_mode": "mode",
+}
+
+_CAT_LABELS = {"read": "read", "shell": "shell", "edit": "edit", "task": "task", "todo": "todo", "ask": "ask", "mode": "mode"}
+
+
+class ToolTurnSummary(Static):
+    """Collapsed tool call summary grouped by category. Default folded. Click to expand."""
+
+    DEFAULT_CSS = """
+    ToolTurnSummary {
+        width: 100%;
+        height: auto;
+        margin: 0 0 1 0;
+        padding: 0 1;
+        background: #14171d;
+        border: tall #273244;
+    }
+    ToolTurnSummary .summary-collapsible {
+        background: #14171d;
+    }
+    """
+
+    def compose(self):
+        for cat in ("read", "shell", "edit", "task", "todo", "ask", "mode", "other"):
+            items = self._by_cat.get(cat, [])
+            if not items:
+                continue
+            label = _CAT_LABELS.get(cat, cat)
+            count = len(items)
+            tool_names = sorted({c.tool_name for c in items})
+            header = f"[{label}] {', '.join(tool_names)} ({count})"
+            body_lines = []
+            for c in items:
+                status = "OK" if c.status == "success" else "ERR" if c.status == "error" else ".."
+                line = f"  [{status}] {c.args_summary}" if c.args_summary else f"  [{status}] {c.tool_name}"
+                if c.output and c.status == "error":
+                    line += f"\n    {_clip(c.output, 200)}"
+                body_lines.append(line)
+            body_text = "\n".join(body_lines)
+            yield Collapsible(Static(body_text), title=header, collapsed=True, classes="summary-collapsible")
+
+    def __init__(self, tool_cards: list[ToolCard]) -> None:
+        self._by_cat: dict[str, list[ToolCard]] = {}
+        for card in tool_cards:
+            cat = _TOOL_CATEGORIES.get(card.tool_name, "other")
+            self._by_cat.setdefault(cat, []).append(card)
+        super().__init__()

@@ -13,9 +13,9 @@ base_url = "https://www.right.codes/claude/v1"
 model = "claude-sonnet-4-6"
 
 [providers.deepseek]
-protocol = "anthropic"
+protocol = "openai"
 api_key = "your-api-key"
-base_url = "https://api.deepseek.com/anthropic"
+base_url = "https://api.deepseek.com"
 model = "deepseek-v4-pro"
 
 [sandbox]

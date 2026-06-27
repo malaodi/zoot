@@ -10,6 +10,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..core.workspace import read_jsonl
+
 
 @dataclass(frozen=True)
 class RunEvidence:
@@ -135,8 +137,4 @@ def _read_json(path: Path | None) -> dict:
 def _read_jsonl(path: Path | None) -> list[dict]:
     if not path or not path.exists():
         return []
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
-    return rows
+    return read_jsonl(path)
