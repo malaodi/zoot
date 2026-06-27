@@ -66,10 +66,17 @@ class CompactManager:
         }
 
     def _summary_text(self, items):
-        files_read = []
-        files_modified = []
+        memory = getattr(self.agent, "memory", None)
+        memory_dict = memory.to_dict() if memory and hasattr(memory, "to_dict") else {}
+        episodic = memory_dict.get("episodic_notes", [])
+        working = memory_dict.get("working", {})
+        task_summary = str(working.get("task_summary", ""))
+        recent_files = working.get("recent_files", [])
+
         user_requests = []
         assistant_notes = []
+        files_read = []
+        files_modified = []
         for item in items:
             if item.get("role") == "user":
                 user_requests.append(str(item.get("content", "")).strip())
@@ -81,17 +88,47 @@ class CompactManager:
                     files_read.append(path)
                 if item.get("name") in {"write_file", "patch_file"} and path:
                     files_modified.append(path)
+
+        goal = task_summary or (user_requests[-1] if user_requests else "-")
+
+        confirmed = [n["text"] for n in episodic if n.get("type") == "confirmed"]
+        ruled_out = [n["text"] for n in episodic if n.get("type") == "ruled_out"]
+        decisions = [n["text"] for n in episodic if n.get("type") == "decision"]
+        blockers = [n["text"] for n in episodic if n.get("type") == "blocker"]
+
+        constraints = ""
+        for d in decisions:
+            if d not in constraints:
+                constraints += ("; " if constraints else "") + d
+        for b in blockers:
+            if b not in constraints:
+                constraints += ("; " if constraints else "") + b
+
+        checkpoint = getattr(self.agent, "render_checkpoint_text", None)
+        next_step = "-"
+        if checkpoint:
+            ckpt_text = str(checkpoint() or "").strip()
+            if ckpt_text:
+                next_step = ckpt_text[:200]
+
         return "\n".join(
             [
-                "Compacted session summary:",
-                f"- Goal: {user_requests[-1] if user_requests else '-'}",
-                "- Constraints and preferences: -",
-                f"- Files read: {', '.join(sorted(set(files_read))) or '-'}",
-                f"- Files modified: {', '.join(sorted(set(files_modified))) or '-'}",
-                f"- Key decisions: {assistant_notes[-1] if assistant_notes else '-'}",
-                f"- Current progress: compacted {len(items)} history items",
-                "- Open blockers: -",
-                "- Next step: continue from the latest preserved turn",
-                "- Critical context: earlier turns were compacted; use preserved latest turns for exact wording",
+                "Compacted task summary:",
+                f"- Goal: {clip(goal, 200)}",
+                f"- Constraints: {clip(constraints, 200) if constraints else '-'}",
+                f"- Confirmed facts: {', '.join(confirmed) if confirmed else '-'}",
+                f"- Ruled-out paths: {', '.join(ruled_out) if ruled_out else '-'}",
+                f"- Decisions made: {', '.join(decisions) if decisions else '-'}",
+                f"- Open blockers: {', '.join(blockers) if blockers else '-'}",
+                f"- Key files: {', '.join(recent_files[:8]) if recent_files else ', '.join(sorted(set(files_read + files_modified))[:8]) or '-'}",
+                f"- Next step: {clip(next_step, 200)}",
+                f"- Compacted {len(items)} history items; preserved latest turns for exact wording",
             ]
         )
+
+
+def clip(text, limit):
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."

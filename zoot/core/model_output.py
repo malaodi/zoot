@@ -4,6 +4,17 @@ import json
 import re
 
 
+_TOOL_REQUIRED_ARGS = {
+    "read_file": {"path"},
+    "search": {"pattern"},
+    "run_shell": {"command"},
+    "write_file": {"path", "content"},
+    "patch_file": {"path", "old_text", "new_text"},
+    "todo_create": {"title"},
+    "ask_user": {"question"},
+}
+
+
 def parse(raw):
     raw = str(raw)
     if "<tool" in raw and (
@@ -47,7 +58,13 @@ def normalize_tool_payload(payload):
     args = payload.get("args", {})
     if not isinstance(args, dict):
         return "tool args must be an object"
-    return [{"name": payload["name"], "args": args}]
+    name = str(payload["name"]).strip()
+    required = _TOOL_REQUIRED_ARGS.get(name)
+    if required:
+        missing = [k for k in required if k not in args or not str(args[k]).strip()]
+        if missing:
+            return f"tool '{name}' missing required args: {', '.join(missing)}"
+    return [{"name": name, "args": args}]
 
 
 def parse_tool_blocks(raw):

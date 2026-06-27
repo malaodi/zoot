@@ -4,6 +4,7 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import os
 import shutil
 import subprocess
 import textwrap
@@ -11,7 +12,7 @@ from functools import partial
 
 from pydantic import ValidationError
 
-from ..core.workspace import IGNORED_PATH_NAMES
+from ..core.workspace import IGNORED_PATH_NAMES, clip
 from .base import RegisteredTool
 from .agents import (
     AGENT_TOOL_EXAMPLES,
@@ -84,9 +85,9 @@ BASE_TOOL_SPECS = {
         "description": "List files in the workspace.",
     },
     "read_file": {
-        "schema": {"path": "str", "start": "int=1", "end": "int=200"},
+        "schema": {"path": "str", "start": "int=1", "end": "int=2000"},
         "risky": False,
-        "description": "Read a UTF-8 file by line range.",
+        "description": "Read a UTF-8 file by line range. Reads from start to end. Output shows total file size so you can plan reads.",
     },
     "search": {
         "schema": {"pattern": "str", "path": "str='.'"},
@@ -116,7 +117,7 @@ BASE_TOOL_SPECS = {
 
 TOOL_EXAMPLES = {
     "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-    "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
+    "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":2000}}</tool>',
     "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
     "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
@@ -206,7 +207,26 @@ def tool_list_files(agent, args):
     lines = []
     for entry in entries[:200]:
         kind = "[D]" if entry.is_dir() else "[F]"
-        lines.append(f"{kind} {entry.relative_to(agent.root)}")
+        rel = entry.relative_to(agent.root)
+        if entry.is_file():
+            try:
+                size = entry.stat().st_size
+                if size >= 1_000_000:
+                    size_str = f"{size / 1_000_000:.1f}MB"
+                elif size >= 1_000:
+                    size_str = f"{size / 1_000:.1f}KB"
+                else:
+                    size_str = f"{size}B"
+                if size < 500_000:
+                    text = entry.read_text(encoding="utf-8", errors="replace")
+                    total_lines = len(text.splitlines())
+                    lines.append(f"{kind} {rel}  ({total_lines} lines, {size_str})")
+                else:
+                    lines.append(f"{kind} {rel}  ({size_str})")
+            except (OSError, UnicodeDecodeError):
+                lines.append(f"{kind} {rel}  ({size_str})")
+        else:
+            lines.append(f"{kind} {rel}")
     return "\n".join(lines) or "(empty)"
 
 
@@ -215,15 +235,20 @@ def tool_read_file(agent, args):
     if not path.is_file():
         raise ValueError("path is not a file")
     start = int(args.get("start", 1))
-    end = int(args.get("end", 200))
+    end = int(args.get("end", 2000))
     if start < 1 or end < start:
         raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    total = len(lines)
     body = "\n".join(
         f"{number:>4}: {line}"
         for number, line in enumerate(lines[start - 1 : end], start=start)
     )
-    return f"# {path.relative_to(agent.root)}\n{body}"
+    result = f"# {path.relative_to(agent.root)}  (lines {start}-{min(end, total)} of {total})\n{body}"
+    MAX_OUTPUT_CHARS = 3000
+    if len(result) > MAX_OUTPUT_CHARS:
+        result = result[:MAX_OUTPUT_CHARS] + "\n[truncated]"
+    return result
 
 
 def tool_search(agent, args):

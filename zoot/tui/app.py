@@ -50,6 +50,7 @@ class ZootTuiApp(App):
         super().__init__(**kwargs)
         self.agent = agent
         self._turn_count = 0
+        self._last_mode = getattr(agent, "runtime_mode", "default")
         self._running_tool_cards: list[ToolCard] = []
         self._confirm_prompt: ConfirmPrompt | None = None
         self._confirm_decision: tuple[threading.Event, dict] | None = None
@@ -280,6 +281,16 @@ class ZootTuiApp(App):
             status = self.query_one(StatusBar)
             status.update_turns(self._turn_count)
             status.update_agent(self.agent)
+            current_mode = getattr(self.agent, "runtime_mode", "default")
+            if self._last_mode == "plan" and current_mode == "default" and self._turn_count > 0:
+                self.query_one(ChatLog).add_message(
+                    "system",
+                    "[system-reminder]\n"
+                    "Your operational mode has changed from plan to build.\n"
+                    "You are no longer in read-only mode.\n"
+                    "You are permitted to make file changes, run shell commands, and utilize your arsenal of tools as needed."
+                )
+            self._last_mode = current_mode
             usage = (getattr(self.agent, "last_prompt_metadata", {}) or {}).get(
                 "context_usage"
             ) or {}

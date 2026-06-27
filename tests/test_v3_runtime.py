@@ -2,6 +2,7 @@ import json
 
 from zoot.testing import ScriptedModelClient
 from zoot import Engine, Zoot, SessionEventBus, SessionStore, WorkspaceContext
+from zoot.core.workspace import read_jsonl
 
 
 def build_agent(tmp_path, outputs, **kwargs):
@@ -20,11 +21,7 @@ def build_agent(tmp_path, outputs, **kwargs):
 def read_session_events(agent):
     path = agent.session_event_bus.path
     assert path.exists()
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    return read_jsonl(path)
 
 
 def event_names(agent):

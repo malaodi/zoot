@@ -93,13 +93,15 @@ def _build_model_client(args):
     # CLI 只负责把 provider profile 翻译成具体协议 client。
     # 例如 deepseek 是 profile，protocol=anthropic 才决定走 Messages API。
     if config.protocol == "openai":
-        return OpenAICompatibleModelClient(
+        client = OpenAICompatibleModelClient(
             model=config.model,
             base_url=config.base_url,
             api_key=config.api_key,
             temperature=args.temperature,
             timeout=getattr(args, "openai_timeout", 300),
         )
+        client.enable_native_tools()
+        return client
     if config.protocol == "anthropic":
         return AnthropicCompatibleModelClient(
             model=config.model,

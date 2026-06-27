@@ -132,3 +132,22 @@ class WorkspaceContext:
             "project_docs": dict(self.project_docs),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def read_jsonl(path):
+    """Read a JSONL file that may contain indented (multi-line) entries."""
+    text = Path(path).read_text(encoding="utf-8")
+    items = []
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and text[pos] in " \t\n\r":
+            pos += 1
+        if pos >= len(text):
+            break
+        try:
+            obj, pos = decoder.raw_decode(text, pos)
+            items.append(obj)
+        except json.JSONDecodeError:
+            break
+    return items

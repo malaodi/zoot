@@ -215,12 +215,17 @@ class Engine:
 
             model_started_at = time.monotonic()
             try:
+                model_kwargs = {
+                    "prompt_cache_key": prompt_cache_key,
+                    "prompt_cache_retention": prompt_cache_retention,
+                }
+                if getattr(agent.model_client, "_tools_enabled", False):
+                    model_kwargs["tools"] = agent.available_tools()
                 result = complete_model(
                     agent.model_client,
                     prompt,
                     agent.max_new_tokens,
-                    prompt_cache_key=prompt_cache_key,
-                    prompt_cache_retention=prompt_cache_retention,
+                    **model_kwargs,
                 )
             except Exception as exc:
                 if agent.abort_requested:
@@ -296,6 +301,7 @@ class Engine:
                     "kind": kind,
                     "completion_metadata": completion_metadata,
                     "duration_ms": duration_ms,
+                    **({"raw_model_output": raw} if kind == "retry" else {}),
                 },
             )
             agent.session_event_bus.emit(

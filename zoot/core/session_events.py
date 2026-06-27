@@ -25,5 +25,5 @@ class SessionEventBus:
         record = self.redact(record)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, sort_keys=True) + "\n")
+            file.write(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
         return record

@@ -279,6 +279,59 @@ def _provider_failure(provider, model, base_url, code, message, request_metadata
     return error
 
 
+def _zoot_tool_to_openai_function(name, tool):
+    schema = tool.schema if hasattr(tool, "schema") else tool.get("schema", {})
+    desc = tool.description if hasattr(tool, "description") else tool.get("description", "")
+    properties = {}
+    required = []
+    for key, val in schema.items():
+        type_str = str(val).partition("=")[0].strip().strip("'")
+        is_required = "=" not in str(val)
+        type_map = {"str": "string", "int": "integer", "bool": "boolean", "float": "number"}
+        prop = {"type": type_map.get(type_str, "string")}
+        if is_required:
+            required.append(key)
+        properties[key] = prop
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": desc,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+def _extract_tool_call_text(data):
+    choices = data.get("choices", [])
+    if not choices:
+        return ""
+    message = choices[0].get("message", {})
+    tool_calls = message.get("tool_calls", [])
+    if tool_calls:
+        parts = []
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            name = func.get("name", "")
+            args_text = func.get("arguments", "{}")
+            try:
+                json.loads(args_text)
+            except json.JSONDecodeError:
+                args_text = "{}"
+            parts.append('<tool>{"name":"' + name + '","args":' + args_text + '}</tool>')
+        return "\n".join(parts)
+    content = message.get("content", "")
+    if isinstance(content, str) and content.strip():
+        if "<tool" not in content and "<final>" not in content:
+            return "<final>" + content + "</final>"
+        return content
+    return ""
+
+
 class OpenAICompatibleModelClient:
     def __init__(self, model, base_url, api_key, temperature, timeout):
         self.model = model
@@ -286,12 +339,86 @@ class OpenAICompatibleModelClient:
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
-        # 当前只在明确支持 prompt cache 语义的后端上启用这条链路，
-        # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
         self.last_completion_metadata = {}
+        self._tools_enabled = False
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+    def enable_native_tools(self):
+        self._tools_enabled = True
+
+    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, tools=None):
+        if tools and self._tools_enabled:
+            return self._complete_with_tools(prompt, max_new_tokens, tools, prompt_cache_key=prompt_cache_key, prompt_cache_retention=prompt_cache_retention)
+        return self._complete_text(prompt, max_new_tokens, prompt_cache_key=prompt_cache_key, prompt_cache_retention=prompt_cache_retention)
+
+    def _complete_with_tools(self, prompt, max_new_tokens, tools, prompt_cache_key=None, prompt_cache_retention=None):
+        self.last_completion_metadata = {}
+        openai_tools = [_zoot_tool_to_openai_function(name, tool) for name, tool in tools.items()]
+
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": openai_tools,
+            "max_tokens": max_new_tokens,
+            "stream": False,
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": OPENAI_COMPATIBLE_USER_AGENT,
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        request = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            body_text, _content_type, request_metadata = _request_with_retries(
+                "openai", self.model, self.base_url, request, self.timeout,
+            )
+        except ProviderError as exc:
+            self.last_completion_metadata = exc.to_metadata()
+            raise
+
+        try:
+            data = json.loads(body_text)
+        except json.JSONDecodeError as exc:
+            error = _provider_failure(
+                "openai", self.model, self.base_url, "invalid_json",
+                "OpenAI-compatible error: backend returned non-JSON content",
+                request_metadata, cause=exc,
+            )
+            self.last_completion_metadata = error.to_metadata()
+            raise error from exc
+
+        if data.get("error"):
+            error = _provider_failure(
+                "openai", self.model, self.base_url, "provider_error",
+                f"OpenAI-compatible error: {data['error']}", request_metadata,
+            )
+            self.last_completion_metadata = error.to_metadata()
+            raise error
+
+        self.last_completion_metadata = dict(request_metadata)
+        text = _extract_tool_call_text(data)
+        if text:
+            return text
+        error = _provider_failure(
+            "openai", self.model, self.base_url, "empty_response",
+            "OpenAI-compatible error: could not extract tool_calls or content from response",
+            request_metadata,
+        )
+        self.last_completion_metadata = error.to_metadata()
+        raise error
+
+    def _complete_text(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
 
         为什么存在：
@@ -435,12 +562,22 @@ class OpenAICompatibleModelClient:
 
 
 def _extract_anthropic_text(data):
+    text_blocks = []
     for item in data.get("content", []):
-        if isinstance(item, dict) and item.get("type") == "text":
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
             text = item.get("text")
             if isinstance(text, str) and text:
-                return text
-    return ""
+                text_blocks.append(text)
+        elif item.get("type") == "tool_use":
+            name = item.get("name", "").strip()
+            inp = item.get("input", {})
+            if name and isinstance(inp, dict):
+                text_blocks.append(
+                    '<tool>' + json.dumps({"name": name, "args": inp}, ensure_ascii=False) + '</tool>'
+                )
+    return "".join(text_blocks)
 
 
 class AnthropicCompatibleModelClient:
