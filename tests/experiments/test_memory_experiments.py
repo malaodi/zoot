@@ -304,6 +304,168 @@ def run_experiment_b4(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# B2 — Confirmed fact retention
+# ---------------------------------------------------------------------------
+def run_experiment_b2(tmp_path):
+    _b2_files = {"conftest.txt": "db_fixture defined exactly once\nno duplicate here"}
+
+    def scenario(process_on: bool):
+        w = build_workspace(tmp_path / ("on" if process_on else "off"), _b2_files)
+        outputs = [
+            '<tool>{"name":"read_file","args":{"path":"conftest.txt","start":1,"end":10}}</tool>',
+            "<final>db_fixture is defined exactly once. Confirmed.</final>",
+        ]
+        if process_on:
+            outputs.append(
+                '<tool>{"name":"search","args":{"pattern":"db_fixture","path":"."}}</tool>'
+            )
+        else:
+            outputs.append(
+                '<tool>{"name":"read_file","args":{"path":"conftest.txt","start":1,"end":10}}</tool>'
+            )
+        outputs.append("<final>No duplicates found elsewhere. Bug is in another area.</final>")
+        a = build_agent(w, outputs, memory_enabled=process_on)
+        a.ask("Check whether db_fixture is defined more than once.")
+        if process_on:
+            a.memory.append_note(
+                "db_fixture is defined exactly once",
+                tags=("process", "confirmed"),
+                kind="process",
+                note_type="confirmed",
+            )
+        turn1_end = len(a.session.get("history", []))
+        inject_layer2_compaction(a)
+        a.ask("Continue debugging why tests still fail.")
+        history = a.session.get("history", [])
+        step2_items = history[turn1_end:]
+        reads = [i for i in step2_items if i.get("role") == "tool" and i.get("name") == "read_file"]
+        return {
+            "repeated_confirmation": len(reads),
+            "tool_steps": len([i for i in step2_items if i.get("role") == "tool"]),
+        }
+
+    return ExperimentResult(
+        scenario="B2: confirmed fact retention",
+        memory_on=scenario(True),
+        memory_off=scenario(False),
+    )
+
+
+# ---------------------------------------------------------------------------
+# B3 — Decision drift prevention
+# ---------------------------------------------------------------------------
+def run_experiment_b3(tmp_path):
+    _b3_files = {"plan.txt": "Decision: run target test before full suite"}
+
+    def scenario(process_on: bool):
+        w = build_workspace(tmp_path / ("on" if process_on else "off"), _b3_files)
+        outputs = [
+            '<tool>{"name":"read_file","args":{"path":"plan.txt","start":1,"end":10}}</tool>',
+            "<final>Decision: run target test before full suite.</final>",
+        ]
+        if process_on:
+            outputs.append(
+                '<tool>{"name":"run_shell","args":{"command":"pytest tests/test_target.py -q","timeout":20}}</tool>'
+            )
+        else:
+            outputs.append(
+                '<tool>{"name":"run_shell","args":{"command":"pytest -q","timeout":20}}</tool>'
+            )
+        outputs.append("<final>Tests passed.</final>")
+        a = build_agent(w, outputs, memory_enabled=process_on)
+        a.ask("Choose whether to run the target test or the full suite first.")
+        if process_on:
+            a.memory.append_note(
+                "run target test before full suite",
+                tags=("process", "decision"),
+                kind="process",
+                note_type="decision",
+            )
+        turn1_end = len(a.session.get("history", []))
+        inject_layer2_compaction(a)
+        a.ask("Proceed with verification.")
+        history = a.session.get("history", [])
+        step2_items = history[turn1_end:]
+        shells = [i for i in step2_items if i.get("role") == "tool" and i.get("name") == "run_shell"]
+        first_cmd = str(shells[0].get("args", {}).get("command", "")) if shells else ""
+        return {
+            "ran_target_first": "test_target.py" in first_cmd,
+            "ran_full_suite": first_cmd == "pytest -q",
+            "tool_steps": len([i for i in step2_items if i.get("role") == "tool"]),
+        }
+
+    return ExperimentResult(
+        scenario="B3: decision drift prevention",
+        memory_on=scenario(True),
+        memory_off=scenario(False),
+    )
+
+
+# ---------------------------------------------------------------------------
+# C2 — Durable memory: key decisions
+# ---------------------------------------------------------------------------
+def run_experiment_c2(tmp_path):
+    _c2_files = {}
+
+    def scenario(durable_on: bool):
+        w = build_workspace(tmp_path / ("on" if durable_on else "off"), _c2_files)
+        a = build_agent(
+            w,
+            [
+                "<final>Decision remembered: login state stored in session_store.</final>",
+                "<final>Implemented login persistence using session_store.</final>",
+            ],
+            memory_enabled=durable_on,
+        )
+        a.ask("/remember login state must be stored in session_store")
+        if durable_on:
+            a.remember_durable_note("login state must be stored in session_store")
+        a.ask("Implement login persistence.")
+        final = str(a.session["history"][-1].get("content", ""))
+        return {
+            "uses_session_store": "session_store" in final.lower() or "session" in final.lower(),
+        }
+
+    return ExperimentResult(
+        scenario="C2: durable key decisions",
+        memory_on=scenario(True),
+        memory_off=scenario(False),
+    )
+
+
+# ---------------------------------------------------------------------------
+# C3 — Durable memory: dependency requirements
+# ---------------------------------------------------------------------------
+def run_experiment_c3(tmp_path):
+    _c3_files = {}
+
+    def scenario(durable_on: bool):
+        w = build_workspace(tmp_path / ("on" if durable_on else "off"), _c3_files)
+        a = build_agent(
+            w,
+            [
+                "<final>Noted: this project uses uv, not pip.</final>",
+                "<final>Running test command: uv run pytest -q</final>",
+            ],
+            memory_enabled=durable_on,
+        )
+        a.ask("/remember this project requires uv, not pip, for Python task execution")
+        if durable_on:
+            a.remember_durable_note("this project requires uv, not pip, for Python task execution")
+        a.ask("Run the project test command.")
+        final = str(a.session["history"][-1].get("content", ""))
+        return {
+            "uses_uv": "uv" in final.lower(),
+        }
+
+    return ExperimentResult(
+        scenario="C3: durable dependency requirements",
+        memory_on=scenario(True),
+        memory_off=scenario(False),
+    )
+
+
+# ---------------------------------------------------------------------------
 # C1 — Durable memory: project convention
 # ---------------------------------------------------------------------------
 def run_experiment_c1(tmp_path):
@@ -372,3 +534,23 @@ def test_experiment_b4_blocker(tmp_path):
 def test_experiment_c1_durable(tmp_path):
     r = run_experiment_c1(tmp_path)
     assert r.memory_on["uses_pytest"] is True
+
+
+def test_experiment_b2_confirmed(tmp_path):
+    r = run_experiment_b2(tmp_path)
+    assert r.memory_on["repeated_confirmation"] == 0
+
+
+def test_experiment_b3_decision(tmp_path):
+    r = run_experiment_b3(tmp_path)
+    assert r.memory_on["ran_target_first"] is True
+
+
+def test_experiment_c2_key_decision(tmp_path):
+    r = run_experiment_c2(tmp_path)
+    assert r.memory_on["uses_session_store"] is True
+
+
+def test_experiment_c3_dependency(tmp_path):
+    r = run_experiment_c3(tmp_path)
+    assert r.memory_on["uses_uv"] is True
