@@ -140,11 +140,12 @@ def render_prompt_section(skills):
 
 
 def render_skills_list(skills):
-    lines = []
+    lines = ["```"]
     for skill in list_skills(skills):
         description = skill.description or skill.when_to_use or "No description"
         hint = f" [{skill.argument_hint}]" if skill.argument_hint else ""
-        lines.append(f"/{skill.name}{hint:<10} {description} [{skill.source}]")
+        lines.append(f"/{skill.name}{hint:<16} {description} [{skill.source}]")
+    lines.append("```")
     return "\n".join(lines)
 
 

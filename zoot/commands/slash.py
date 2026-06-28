@@ -46,9 +46,10 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
 
 
 def command_help_text() -> str:
-    lines = ["Commands:"]
+    lines = ["```"]
     for command in SLASH_COMMANDS:
-        lines.append(f"{command.usage:<32} {command.description}")
+        lines.append(f"{command.usage:<34} {command.description}")
+    lines.append("```")
     return "\n".join(lines)
 
 
